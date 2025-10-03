@@ -1,3 +1,4 @@
+![ci](https://github.com/ferrermartinn/ScannerBot/actions/workflows/ci.yml/badge.svg)
 # 🪙 P2P Arbitrage Scanner
 
 Herramienta en Python para escanear oportunidades de arbitraje en mercados P2P de criptomonedas. Incluye lógica automatizada de análisis y un dashboard interactivo con Streamlit para monitoreo en tiempo real.
@@ -40,3 +41,4 @@ source .venv/bin/activate
 
 # Instalar dependencias
 pip install -r requirements.txt
+
