@@ -1,0 +1,11 @@
+﻿services:
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+
+  scanner:
+    build: .
+    command: python -m app.service.scanner_p2p
+    restart: unless-stopped

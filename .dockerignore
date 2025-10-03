@@ -1,0 +1,13 @@
+﻿.venv/
+__pycache__/
+*.pyc
+*.log
+logs/
+.env
+.env.*
+config.json
+historico_*.json
+data.json
+state.json
+.git/
+.gitignore
