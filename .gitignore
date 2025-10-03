@@ -1,0 +1,26 @@
+@'
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.env.*
+.pytest_cache/
+
+# Logs y datos locales
+logs/
+*.log
+config.json
+*.db
+snapshots/
+state.json
+historico_*.json
+data.json
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+'@ | Out-File -Encoding UTF8 .gitignore

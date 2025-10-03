@@ -1,0 +1,14 @@
+version: 1
+disable_existing_loggers: false
+formatters:
+  concise:
+    format: "%(asctime)s | %(levelname)s | %(message)s"
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: INFO
+    formatter: concise
+    stream: ext://sys.stdout
+root:
+  level: INFO
+  handlers: [console]

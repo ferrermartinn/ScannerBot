@@ -1,0 +1,18 @@
+http://localhost:5000
+
+/start → inicia el bot
+
+/operar → activa modo con mensajes
+
+/parar → modo silencioso
+
+/setpozo 500 → cambia el pozo de referencia
+
+/reporte → reporte de 30 días
+
+/reporte semana → últimos 7 días
+
+/reporte mes → últimos 30 días
+
+/reporte 90 → últimos 90 días
+
