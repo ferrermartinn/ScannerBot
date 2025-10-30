@@ -1,0 +1,8 @@
+{
+  "fiat": "ARS",
+  "assets": ["USDT","BTC","ETH","XRP"],
+  "pay_types": [],
+  "tick": 0.01,
+  "buy_undercut": true,
+  "sell_overcut": true
+}
