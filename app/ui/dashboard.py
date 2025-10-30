@@ -13,9 +13,34 @@ import streamlit as st
 import altair as alt
 import pandas as pd
 
-DATA_FILE = "data.json"
-CONFIG_FILE = "config.json"
-HIST_FILE  = "historico_spreads.json"
+import os, json
+
+DATA_DIR = os.getenv("DASHBOARD_DATA_PATH", "/app/data")
+DATA_FILE = os.path.join(DATA_DIR, "data.json")
+
+# Debug rápido desde UI
+def debug_box():
+    st.sidebar.divider()
+    dbg = st.sidebar.toggle("🔧 Debug JSON", value=False, key="dbg_json")
+    if dbg:
+        st.subheader("Debug: data.json leído por el dashboard")
+        st.caption("Confirma que 'assets → USDT → competitor_*' tiene datos.")
+        st.json(load_data())
+
+
+def load_data():
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def get_asset(name: str):
+    d = load_data()
+    return d["assets"].get(name, {})
+
+
+DATA_FILE   = os.path.join(DATA_DIR, "data.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+HIST_FILE   = os.path.join(DATA_DIR, "historico_spreads.json")
+
 
 ASSETS = ["USDT", "BTC", "ETH", "XRP"]
 
@@ -31,7 +56,7 @@ DEFAULT_CFG = {
     "alert_spread_pct_by_asset": {},
     "alert_min_ars": 1500.0,
     "alert_min_ars_by_asset": {},
-    "pozo_ref_usd": 400.0,
+    "pozo_ref_usd": 900.0,
     "min_order_pct": 0.10,
     "top_compete_n": 5,
     "size_widen_pct": 25.0,
@@ -61,6 +86,12 @@ DEFAULT_CFG = {
     },
     "pinned_asset": None,
     "pay_types": [],
+    # >>> NUEVO <<<
+    "competitor_filters": {
+        "pozo_usd_min": 500.0,
+        "pozo_usd_max": 1300.0,
+        "min_order_ars": 100000.0
+    },
 }
 
 def deepmerge(base: dict, defaults: dict) -> dict:
@@ -95,8 +126,6 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     write_json(CONFIG_FILE, cfg)
 
-def load_data() -> dict:
-    return read_json(DATA_FILE, {"timestamp": "-", "assets": {}, "fiat": "ARS"}) or {"timestamp": "-", "assets": {}, "fiat": "ARS"}
 
 def as_float(x) -> Optional[float]:
     try:
@@ -141,6 +170,41 @@ def fx_usdt_from_assets(assets: Dict[str, Any]) -> float:
         return sum(c)/len(c) if c else 1.0
     except Exception:
         return 1.0
+
+def _cap_ars_from_cfg(cfg: dict, assets: dict) -> float:
+    fx = fx_usdt_from_assets(assets or {})
+    pozo = float(cfg.get("pozo_ref_usd", 400.0))
+    return pozo * float(fx or 1.0)
+
+def _apply_comp_filters(rows: list, cfg: dict, assets: dict) -> list:
+    cf = (cfg or {}).get("competitor_filters") or {}
+    pozo_min = float(cf.get("pozo_usd_min", 0.0))
+    pozo_max = float(cf.get("pozo_usd_max", 10**9))
+    min_order_ars = float(cf.get("min_order_ars", 0.0))
+
+    fx = fx_usdt_from_assets(assets or {})
+    pozo_min_ars = pozo_min * fx
+    pozo_max_ars = pozo_max * fx
+    cap_ars = _cap_ars_from_cfg(cfg, assets)
+
+    out = []
+    for r in rows or []:
+        try:
+            minAmt = as_float(r.get("minAmount"))
+            totAmt = as_float(r.get("totalAmount"))
+            if minAmt is None or totAmt is None:
+                continue
+            if minAmt < min_order_ars:
+                continue
+            if not (pozo_min_ars <= totAmt <= pozo_max_ars):
+                continue
+            if minAmt > cap_ars:
+                continue
+            out.append(r)
+        except Exception:
+            continue
+    return out
+
 
 def badge_html(text: str, color: str) -> str:
     return f"<span style='background:{color};color:#000;padding:2px 8px;border-radius:10px;font-weight:700;font-size:0.7rem;'>{text}</span>"
@@ -246,16 +310,52 @@ def _sizing_panel(asset: str, info: dict):
     with c2: st.metric("ARS/USDT (est.)", fmt_price(fx))
     with c3: st.metric("P&L estimado (ARS)", "-" if pnl is None else f"{pnl:,.0f}")
 
+# --- Status de data.json en sidebar ---
+import os, json, time, streamlit as st
+
+def _file_health(path="/app/data/data.json"):
+    try:
+        stt = os.stat(path)
+        d = json.load(open(path, "r", encoding="utf-8"))
+        u = (d.get("assets") or {}).get("USDT", {}) or {}
+        return {
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stt.st_mtime)),
+            "size": stt.st_size,
+            "buyers": len(u.get("buyers_table") or []),
+            "sellers": len(u.get("sellers_table") or []),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+with st.sidebar:
+    st.subheader("Data status")
+    h = _file_health()
+    if "error" in h:
+        st.error(h["error"])
+    else:
+        st.metric("Updated", h["updated_at"])
+        st.metric("Size (bytes)", h["size"])
+        st.metric("Buyers/Sellers", f"{h['buyers']}/{h['sellers']}")
+# --- fin status ---
+
+
 def _depth_panel(info: dict, depth: int = 6):
-    sellers = (info.get("sellers_table") or [])[:depth]
-    buyers  = (info.get("buyers_table")  or [])[:depth]
+    cfg = load_config()
+    assets_all = (load_data() or {}).get("assets") or {}
+
+    sellers_raw = (info.get("sellers_table") or [])
+    buyers_raw  = (info.get("buyers_table")  or [])
+
+    sellers = _apply_comp_filters(sellers_raw, cfg, assets_all)[:depth]
+    buyers  = _apply_comp_filters(buyers_raw,  cfg, assets_all)[:depth]
+
     c1, c2 = st.columns(2)
     with c1:
-        st.caption("Vendedores (mejores primero)")
+        st.caption("Vendedores comparables (mejores primero)")
         for r in sellers:
             st.markdown(f"- **{r.get('nickName','-')}** @ {fmt_price(r.get('price'))} · min {fmt_price(r.get('minAmount'))} · total {fmt_price(r.get('totalAmount'))}")
     with c2:
-        st.caption("Compradores (mejores primero)")
+        st.caption("Compradores comparables (mejores primero)")
         for r in buyers:
             st.markdown(f"- **{r.get('nickName','-')}** @ {fmt_price(r.get('price'))} · min {fmt_price(r.get('minAmount'))} · total {fmt_price(r.get('totalAmount'))}")
 
@@ -541,6 +641,8 @@ st.set_page_config(layout="wide", page_title="Dashboard P2P")
 
 cfg = load_config()
 section = sidebar_sections(cfg)
+debug_box()  # ← muestra el JSON si activás el toggle
+
 
 data = load_data()
 assets = data.get("assets") or {}

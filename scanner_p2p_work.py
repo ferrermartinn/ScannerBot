@@ -47,7 +47,7 @@ DEFAULT_CONFIG = {
     "alert_min_ars_by_asset": {},
     "trade_costs": {"taker_fee_pct": 0.10, "slippage_pct": 0.05},
     "blacklist": [],
-    "allow_sim": True,
+    "allow_sim": False,
     "positioning": {"window_s": 60, "dumping_drop_pct": 0.006, "debounce_s": 45},
 }
 
@@ -178,6 +178,7 @@ def is_verified_ad(ad: dict) -> bool:
         return False
 
 # ====== Binance P2P ======
+
 def binance_p2p_query(asset: str, trade_type: str, fiat: str, pay_types: List[str]) -> List[dict]:
     payload = {
         "asset": asset, "tradeType": trade_type, "fiat": fiat,
@@ -186,7 +187,19 @@ def binance_p2p_query(asset: str, trade_type: str, fiat: str, pay_types: List[st
     try:
         r = requests.post(BINANCE_P2P_URL, headers=HEADERS, json=payload, timeout=15)
         r.raise_for_status()
-        return (r.json() or {}).get("data") or []
+        d = r.json() or {}
+        data = d.get("data")
+        # Formato nuevo: { data: { advList: [...] } }
+        if isinstance(data, dict):
+            advs = data.get("advList")
+            if isinstance(advs, list):
+                return advs
+            advs2 = data.get("data")
+            return advs2 if isinstance(advs2, list) else []
+        # Formato viejo: { data: [...] }
+        if isinstance(data, list):
+            return data
+        return []
     except Exception as e:
         log.warning(f"[P2P] Falla consulta {asset}/{trade_type}: {e}")
         return []
@@ -222,7 +235,7 @@ def play_sound(kind: str, cfg: dict):
 def build_asset_view(asset: str, cfg: dict) -> dict:
     fiat = cfg.get("fiat", "ARS")
     pay_types = cfg.get("pay_types") or []
-    allow_sim = bool(cfg.get("allow_sim", True))
+    allow_sim = False  # hard-off
 
     sellers_raw = binance_p2p_query(asset, "SELL", fiat, pay_types)
     buyers_raw  = binance_p2p_query(asset, "BUY",  fiat, pay_types)

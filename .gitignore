@@ -7,6 +7,8 @@ __pycache__/
 .env
 .env.*
 .pytest_cache/
+.env
+
 
 # Logs y datos locales
 logs/
