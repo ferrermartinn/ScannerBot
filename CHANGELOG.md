@@ -1,8 +1,4 @@
-﻿# Changelog
-
-## v0.1.0 — Initial public release
-- Project structure (app/{service,ui,core})
-- Streamlit dashboard
-- Scanner CLI
-- CI workflow (lint non-blocking + smoke tests)
-- Dockerfile + docker-compose
+# v0.1.0-beta.1 — spread% + hints
+- Dashboard: muestra Spread % y sugerencias **Mi Compra/Mi Venta**.
+- Script start_bot.bat.
+- data/ y logs fuera del repo.
