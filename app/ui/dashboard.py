@@ -698,3 +698,5 @@ elif section == "Monitoreo & registro":
     st.divider()
     st.subheader("🕒 Spreads (histórico)")
     render_history(seconds_window=1800)
+import streamlit as st
+st.sidebar.caption("ScannerBot v0.1.0-beta.1")
