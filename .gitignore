@@ -50,3 +50,6 @@ patch_ui_calc.py
 smoke_spread.py
 ui_safe_replace.py
 ui_sidebar_spread.py
+
+scannerbot-*.zip
+
