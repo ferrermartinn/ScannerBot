@@ -26,3 +26,9 @@ data.json
 .DS_Store
 Thumbs.db
 '@ | Out-File -Encoding UTF8 .gitignore
+# runtime
+/data/
+/logs/
+*.log
+.venv/
+__pycache__/
