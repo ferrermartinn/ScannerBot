@@ -41,3 +41,12 @@ patch_ui_calc.py
 smoke_spread.py
 ui_safe_replace.py
 ui_sidebar_spread.py
+# dev helpers (no versionar)
+fix_ui_inject_once.py
+fix_ui_render.py
+patch_spread_hints.py
+patch_ui.py
+patch_ui_calc.py
+smoke_spread.py
+ui_safe_replace.py
+ui_sidebar_spread.py
