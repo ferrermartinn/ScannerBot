@@ -11,6 +11,50 @@ import os, json, time, logging, requests
 from datetime import datetime
 from collections import deque
 from typing import List, Dict, Any, Optional
+# === injected helpers (pay filter + extractor fallback) ===
+import json
+
+def _passes_pay_filter(item: dict, pay_types):
+    if not pay_types:
+        return True
+    try:
+        blob = json.dumps(item, ensure_ascii=False).lower()
+    except Exception:
+        return True
+    needles = [str(x).lower() for x in pay_types if x]
+    return any(n in blob for n in needles)
+
+def _extract_price_nick_fallback(item: dict):
+    # Binance P2P típico: {"adv": {...,"price": "1488.00"}, "advertiser": {"nickName": "X"}}
+    price = None
+    nick  = "-"
+    try:
+        adv = item.get("adv") or {}
+        p = adv.get("price") or adv.get("advPrice") or adv.get("priceFloat")
+        if isinstance(p, str):
+            p = p.replace(",", "").strip()
+        price = float(p) if p not in (None, "", "-") else None
+    except Exception:
+        price = None
+    try:
+        nick = (item.get("advertiser") or {}).get("nickName") or adv.get("sellerNickName") or "-"
+    except Exception:
+        nick = "-"
+    return price, nick
+# === injected pay-method helpers ===
+def _passes_pay_filter(item: dict, pay_types):
+    # Si no hay filtros, pasa todo
+    if not pay_types:
+        return True
+    # Texto plano con todo el anuncio para búsquedas robustas
+    try:
+        blob = json.dumps(item, ensure_ascii=False).lower()
+    except Exception:
+        return True
+    # normalizo agujas
+    needles = [str(x).lower() for x in pay_types if x]
+    # match si aparece cualquiera de las agujas
+    return any(n in blob for n in needles)
 
 # ====== ENV / PATHS ======
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
@@ -222,57 +266,68 @@ def play_sound(kind: str, cfg: dict):
 def build_asset_view(asset: str, cfg: dict) -> dict:
     fiat = cfg.get("fiat", "ARS")
     pay_types = cfg.get("pay_types") or []
-    allow_sim = bool(cfg.get("allow_sim", True))
 
-    sellers_raw = binance_p2p_query(asset, "SELL", fiat, pay_types)
-    buyers_raw  = binance_p2p_query(asset, "BUY",  fiat, pay_types)
+    try:
+        buy_raw  = binance_p2p_query(asset, "BUY",  fiat, [])   # sin filtro duro
+        sell_raw = binance_p2p_query(asset, "SELL", fiat, [])   # sin filtro duro
+    except Exception as e:
+        log.warning(f"[build_asset_view] query error: {e}")
+        buy_raw, sell_raw = [], []
 
-    if not sellers_raw and allow_sim:
-        sellers_raw = sim_rows(asset, "SELL")
-    if not buyers_raw and allow_sim:
-        buyers_raw  = sim_rows(asset, "BUY")
+    # filtro suave por texto
+    buy_raw  = [it for it in buy_raw  if _passes_pay_filter(it, pay_types)]
+    sell_raw = [it for it in sell_raw if _passes_pay_filter(it, pay_types)]
 
-    if cfg.get("verified_only"):
-        sellers_raw = [ad for ad in sellers_raw if is_verified_ad(ad)]
-        buyers_raw  = [ad for ad in buyers_raw  if is_verified_ad(ad)]
+    # elegir extractor disponible
+    extractor = globals().get("_extract_price_nick", _extract_price_nick_fallback)
 
-    sellers_tab = [norm_row(ad) for ad in sellers_raw]
-    buyers_tab  = [norm_row(ad) for ad in buyers_raw]
+    buyers_table, sellers_table = [], []
+    for it in buy_raw:
+        try:
+            price, nick = extractor(it)
+        except Exception:
+            price, nick = _extract_price_nick_fallback(it)
+        if price is not None:
+            buyers_table.append({"nickName": nick, "price": price})
 
-    sellers_tab = [r for r in sellers_tab if (r.get("price") is not None and not is_blacklisted_name(r.get("nickName"), cfg))]
-    buyers_tab  = [r for r in buyers_tab  if (r.get("price") is not None and not is_blacklisted_name(r.get("nickName"), cfg))]
+    for it in sell_raw:
+        try:
+            price, nick = extractor(it)
+        except Exception:
+            price, nick = _extract_price_nick_fallback(it)
+        if price is not None:
+            sellers_table.append({"nickName": nick, "price": price})
 
-    sellers_table = sellers_tab[:10]  # menor precio
-    buyers_table  = buyers_tab[:10]   # mayor precio
+    buyers_table  = sorted(buyers_table,  key=lambda x: x["price"])
+    sellers_table = sorted(sellers_table, key=lambda x: x["price"])
 
-    comp_sell = sellers_table[0] if sellers_table else {"nickName": "-", "price": None}
-    comp_buy  = buyers_table[0]  if buyers_table  else {"nickName": "-", "price": None}
+    competitor_buy  = buyers_table[0]  if buyers_table  else {"nickName": "-", "price": None}
+    competitor_sell = sellers_table[0] if sellers_table else {"nickName": "-", "price": None}
 
-    eps = get_margin(asset, cfg)  # EPS absoluto
-    top_seller_price = comp_sell["price"] if comp_sell["price"] is not None else None
-    top_buyer_price  = comp_buy["price"]  if comp_buy["price"]  is not None else None
-
-    my_ad_buy  = round(top_buyer_price + eps, 2) if top_buyer_price is not None else None
-    my_ad_sell = round(top_seller_price - eps, 2) if top_seller_price is not None else None
+    bprice = competitor_buy.get("price")
+    sprice = competitor_sell.get("price")
 
     spread_percent = None
-    if top_seller_price and top_buyer_price and top_seller_price > 0:
-        gross = (top_buyer_price / top_seller_price - 1.0) * 100.0
-        tc = cfg.get("trade_costs", {}) or {}
-        costs = float(tc.get("taker_fee_pct", 0.0)) + float(tc.get("slippage_pct", 0.0))
-        spread_percent = round(gross - costs, 2)
+    if bprice is not None and sprice is not None and bprice > 0:
+        spread_percent = (sprice - bprice) / bprice * 100.0
+
+    tick = float(cfg.get("tick", 0.01) or 0.01)
+    buy_undercut  = bool(cfg.get("buy_undercut", True))
+    sell_overcut  = bool(cfg.get("sell_overcut", True))
+
+    my_buy_hint  = round(bprice - tick if bprice is not None and buy_undercut else (bprice + tick if bprice is not None else 0), 2) if bprice is not None else None
+    my_sell_hint = round(sprice + tick if sprice is not None and sell_overcut else (sprice - tick if sprice is not None else 0), 2) if sprice is not None else None
 
     return {
-        "competitor_buy":  {"nickName": comp_buy["nickName"],  "price": top_buyer_price},
-        "competitor_sell": {"nickName": comp_sell["nickName"], "price": top_seller_price},
-        "my_suggest_buy":  my_ad_buy,
-        "my_suggest_sell": my_ad_sell,
-        "spread_percent":  spread_percent,
-        "sellers_table":   sellers_table,
-        "buyers_table":    buyers_table,
+        "asset": asset,
+        "competitor_buy":  competitor_buy,
+        "competitor_sell": competitor_sell,
+        "buyers_table": buyers_table,
+        "sellers_table": sellers_table,
+        "spread_percent": spread_percent,
+        "my_buy_hint":  my_buy_hint,
+        "my_sell_hint": my_sell_hint,
     }
-
-# ====== Histórico ======
 def append_history_flat(assets_out: Dict[str, Any]):
     hist = safe_read_json(HISTORICO_FILE, [])
     if not isinstance(hist, list):
