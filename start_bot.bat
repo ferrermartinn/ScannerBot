@@ -1,12 +1,15 @@
 @echo off
-echo Starting Docker...
-docker compose up -d
+echo Starting ScannerBot (scanner + dashboard + writer)...
+docker compose -f docker-compose.yml -f docker-compose.writer.yml up -d --build
 
-echo Verifying containers...
-docker compose ps
+echo Waiting writer health...
+for /l %%i in (1,1,20) do (
+  docker compose -f docker-compose.yml -f docker-compose.writer.yml ps | findstr /i "writer" | findstr /i "healthy" >nul && goto OK
+  timeout /t 2 >nul
+)
+echo Writer no healthy aun. Continuo igual...
 
-echo Starting writer in background...
-docker compose exec scanner sh -lc "nohup python -u /app/app/writer_log.py > /dev/null 2>&1 & echo \$! > /tmp/w_writer.pid"
-
-echo All set! The bot is running in the background.
-pause
+:OK
+start http://localhost:8501
+echo Listo. Presiona una tecla para salir.
+pause >nul
