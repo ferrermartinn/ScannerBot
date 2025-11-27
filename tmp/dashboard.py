@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Dashboard P2P — v3.4.2
@@ -5,38 +6,20 @@ Dashboard P2P — v3.4.2
 - Posicionamiento inteligente + Anti-persecución configurables
 """
 
-import os, json, time
-import tempfile
-from pathlib import Path
+import json, os, time
+from typing import Dict, Any, List, Optional, Tuple
 
 import streamlit as st
 import altair as alt
 import pandas as pd
-from typing import Any, Dict, List, Optional, Tuple
 
-# === Paths compartidos con scanner_p2p ===
-ROOT_DIR = Path(__file__).resolve().parents[2]  # .../ScannerBot
-DATA_DIR = os.getenv("DATA_DIR") or os.path.join(ROOT_DIR, "data")
-
-os.makedirs(DATA_DIR, exist_ok=True)
-
-DATA_FILE        = os.path.join(DATA_DIR, "data.json")
-CONFIG_FILE      = os.path.join(DATA_DIR, "config.json")
-HIST_FILE        = os.path.join(DATA_DIR, "historico_spreads_v2.json")
-EFFECTIVE_FILE   = os.path.join(DATA_DIR, "data_effective.json")
-
-
-st.set_page_config(layout="wide", page_title="Dashboard P2P")
-
-def load_effective_data():
-    try:
-        with open(EFFECTIVE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        # Si no existe o aún no se genera, no rompemos el dashboard.
-        return {}
-
-
+import os, json
+# === injected: pay types controls ===
+from pathlib import Path
+import json, tempfile, os, streamlit as st
+# === injected: robust data loader ===
+import time, json, streamlit as st
+from pathlib import Path
 
 def _append_history_snapshot():
     """Agrega una fila por activo al archivo historico_spreads_v2.json."""
@@ -117,12 +100,25 @@ def load_history_last_minutes(minutes: int = 30) -> pd.DataFrame:
     keep = [c for c in ("datetime","asset","spread") if c in df.columns]
     df = df[keep].sort_values("datetime")
     return df
-
 # injected: pandas DataFrame guard for scalar dicts
+try:
+    import pandas as _pd
+    _DF_ORIG = _pd.DataFrame
+    def _DF_GUARD(data=None, *args, **kwargs):
+        try:
+            if isinstance(data, dict):
+                # ¿todos escalares? => convertir a una sola fila
+                if all(not isinstance(v, (list, tuple, dict, _pd.Series, _pd.Index, _pd.DataFrame)) for v in data.values()):
+                    return _DF_ORIG([data], *args, **kwargs)
+        except Exception:
+            pass
+        return _DF_ORIG(data, *args, **kwargs)
+    if not getattr(_pd.DataFrame, "__name__", "") == "_DF_GUARD":
+        _pd.DataFrame = _DF_GUARD
+except Exception:
+    pass
 
-
-_DATA = Path(DATA_FILE)
-
+_DATA = Path("/app/data/data.json")
 
 def _safe_read_json(max_tries: int = 6, delay: float = 0.20):
     for _ in range(max_tries):
@@ -148,59 +144,27 @@ def _view_defaults(v: dict) -> dict:
     return v
 
 def load_views_or_fallback():
-    """
-    Lee data.json y sólo actualiza la vista si hay datos reales.
-    Si llega un tick vacío (competidor '-' y precios/mesas nulos),
-    mantiene la última muestra buena en session_state para evitar parpadeos.
-    """
+    # Lee data.json con reintentos; si falla, usa la última muestra buena
     data = _safe_read_json()
     now = time.time()
 
-    last_views = st.session_state.get("_last_good_views", {})
-
-    if not (data and isinstance(data, dict) and "assets" in data):
-        return last_views
-
-    # chequeo de timestamp
-    ts_ok = True
-    try:
-        import datetime as _dt
-        t = _dt.datetime.strptime(data.get("timestamp", "1970-01-01 00:00:00"),
-                                  "%Y-%m-%d %H:%M:%S")
-        ts_ok = (now - t.timestamp()) < 40  # ventana un poco más amplia
-    except Exception:
+    if data and isinstance(data, dict):
         ts_ok = True
+        try:
+            import datetime as _dt
+            t = _dt.datetime.strptime(data.get("timestamp","1970-01-01 00:00:00"), "%Y-%m-%d %H:%M:%S")
+            ts_ok = (now - t.timestamp()) < 20
+        except Exception:
+            ts_ok = True
 
-    assets = data.get("assets") or {}
-    views = {a: _view_defaults(v) for a, v in assets.items()}
+        if ts_ok and "assets" in data:
+            views = {a: _view_defaults(v) for a, v in data["assets"].items()}
+            st.session_state["_last_good_views"] = views
+            return views
 
-    # detecta si hay información "real" en al menos un activo
-    def _has_real_info(v: dict) -> bool:
-        b = (v.get("competitor_buy") or {}).get("price")
-        s = (v.get("competitor_sell") or {}).get("price")
-        sp = v.get("spread_percent") or v.get("spread_pct")
-        sellers = v.get("sellers_table") or []
-        buyers  = v.get("buyers_table") or []
-        if b not in (None, 0, "0") or s not in (None, 0, "0"):
-            return True
-        if sp not in (None, 0, "0", "0.0"):
-            return True
-        if sellers or buyers:
-            return True
-        return False
+    return st.session_state.get("_last_good_views", {})
 
-    has_real = any(_has_real_info(v) for v in views.values())
-
-    # sólo si hay datos válidos actualizamos la cache
-    if ts_ok and has_real:
-        st.session_state["_last_good_views"] = views
-        return views
-
-    # si no, devolvemos lo último bueno
-    return last_views
-
-_CFG_PATH = Path(CONFIG_FILE)
-
+_CFG_PATH = Path("/app/data/config.json")
 
 def _cfg_load_sidebar():
     # fallback sensato si no existe
@@ -255,6 +219,8 @@ def sidebar_paytypes_controls():
         st.sidebar.success("Filtro guardado")
         st.rerun()
 
+DATA_DIR = os.getenv("DASHBOARD_DATA_PATH", "/app/data")
+DATA_FILE = os.path.join(DATA_DIR, "data.json")
 
 # Debug rápido desde UI
 def debug_box():
@@ -263,8 +229,7 @@ def debug_box():
     if dbg:
         st.subheader("Debug: data.json leído por el dashboard")
         st.caption("Confirma que 'assets → USDT → competitor_*' tiene datos.")
-        st.json(_safe_read_json() or {})
-
+        st.json(load_data())
 
 
 def load_data():
@@ -274,6 +239,12 @@ def load_data():
 def get_asset(name: str):
     d = load_data()
     return d["assets"].get(name, {})
+
+
+DATA_FILE   = os.path.join(DATA_DIR, "data.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+HIST_FILE   = os.path.join(DATA_DIR, "historico_spreads_v2.json")
+
 
 ASSETS = ["USDT", "BTC", "ETH", "XRP"]
 
@@ -558,26 +529,19 @@ def _sizing_panel(asset: str, info: dict):
 # --- Status de data.json en sidebar ---
 import os, json, time, streamlit as st
 
-# --- Status de data.json en sidebar ---
-import os as _os, json as _json, time as _time
-
-def _file_health(path: str | None = None):
-    """Muestra salud del mismo archivo que usa el dashboard (DATA_FILE)."""
+def _file_health(path="/app/data/data.json"):
     try:
-        path = path or DATA_FILE  # usamos el DATA_FILE global
-        stt = _os.stat(path)
-        with open(path, "r", encoding="utf-8") as fh:
-            d = _json.load(fh)
+        stt = os.stat(path)
+        d = json.load(open(path, "r", encoding="utf-8"))
         u = (d.get("assets") or {}).get("USDT", {}) or {}
         return {
-            "updated_at": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(stt.st_mtime)),
+            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stt.st_mtime)),
             "size": stt.st_size,
             "buyers": len(u.get("buyers_table") or []),
             "sellers": len(u.get("sellers_table") or []),
         }
     except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}"}
-
+        return {"error": str(e)}
 
 with st.sidebar:
     st.subheader("Data status")
@@ -642,43 +606,21 @@ def card_expanded(asset: str, info: dict):
         with st.expander("📊 Sizing & PnL"):
             _sizing_panel(asset, info)
 
-# ===== versión simple preservada sin borrar, renombrada para no sobrescribir =====
 def load_history_last_minutes(minutes: int = 30) -> pd.DataFrame:
-    # lector robusto de histórico
     raw = read_json(HIST_FILE, []) or []
-    # Acepta list[dict] o dict con {rows|data|items|history:[...]}
-    if isinstance(raw, dict):
-        for k in ("rows", "data", "items", "history"):
-            v = raw.get(k)
-            if isinstance(v, list):
-                raw = v
-                break
-        else:
-            raw = []
-    rows = [r for r in raw if isinstance(r, dict)]
-    if not rows:
-        return pd.DataFrame(columns=["datetime", "asset", "spread"])
-
-    try:
-        df = pd.DataFrame.from_records(rows)
-    except Exception:
-        return pd.DataFrame(columns=["datetime", "asset", "spread"])
-
+    if not raw:
+        return pd.DataFrame(columns=["datetime","asset","spread"])
+    df = pd.DataFrame(raw)
     if "datetime" not in df.columns:
-        return pd.DataFrame(columns=["datetime", "asset", "spread"])
-
+        return pd.DataFrame(columns=["datetime","asset","spread"])
     try:
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True).dt.tz_convert(None)
+        df["datetime"] = pd.to_datetime(df["datetime"])
     except Exception:
-        return pd.DataFrame(columns=["datetime", "asset", "spread"])
-
-    df = df.dropna(subset=["datetime"])
+        return pd.DataFrame(columns=["datetime","asset","spread"])
     tmin = pd.Timestamp.utcnow() - pd.Timedelta(minutes=minutes)
     df = df[df["datetime"] >= tmin.tz_localize(None)]
-    keep = [c for c in ("datetime", "asset", "spread") if c in df.columns]
-    return df[keep].sort_values("datetime")
+    return df.sort_values("datetime")
 
-# ================================================================================
 def render_history(seconds_window: int = 1800):
     st.subheader("🕒 Spreads últimos 30 minutos")
     df = load_history_last_minutes(minutes=seconds_window//60)
@@ -699,14 +641,11 @@ def sidebar_sections(cfg: dict) -> str:
     st.session_state["ui_section"] = section
 
     if section == "Operar":
-        st.markdown("# Dashboard P2P")
-        render_metrics()  # Mostrar las métricas aquí
         if "ui_verified_only" not in st.session_state:
             st.session_state["ui_verified_only"] = bool(cfg.get("verified_only", False))
         def _on_change_verified():
             c = load_config(); c["verified_only"] = bool(st.session_state.get("ui_verified_only")); save_config(c)
         st.sidebar.toggle("Solo comerciantes verificados", key="ui_verified_only", on_change=_on_change_verified)
-        
 
         c1, c2 = st.sidebar.columns(2)
         with c1:
@@ -734,7 +673,6 @@ def sidebar_sections(cfg: dict) -> str:
             "Elegí si querés anclar un activo",
             options=["Ninguno"] + ASSETS,
             index=(["Ninguno"] + ASSETS).index(st.session_state["ui_select_pin"]),
-
             key="ui_select_pin",
             on_change=_on_change_pin,
         )
@@ -888,33 +826,6 @@ def sidebar_sections(cfg: dict) -> str:
             st.success("Reporte generado (panel central)")
     return section
 
-def render_metrics():
-    data = load_effective_data()
-    if not data:
-        st.warning("No se encontraron métricas efectivas.")
-        return
-
-    assets = data.get("assets", {})
-    metrics = []
-    for asset, values in assets.items():
-        metrics.append({
-            "Asset": asset,
-            "Effective Buy Price": values.get("effective_buy_price"),
-            "Effective Sell Price": values.get("effective_sell_price"),
-            "Effective Mid": values.get("effective_mid"),
-            "Effective Spread (%)": values.get("effective_spread_percent")
-        })
-
-    df = pd.DataFrame(metrics)
-
-    st.title("Arbitraje - Métricas de Efectividad")
-    st.write(df)
-
-    # Mostrar gráficos de las métricas
-    st.bar_chart(df.set_index("Asset")[["Effective Buy Price", "Effective Sell Price"]])
-    st.line_chart(df.set_index("Asset")[["Effective Spread (%)"]])
-
-
 def _generate_report():
     data = load_data()
     assets = data.get("assets") or {}
@@ -944,99 +855,90 @@ def _generate_report():
         "P&L est. (ARS)": "{:,.0f}"
     }), use_container_width=True)
 
+st.set_page_config(layout="wide", page_title="Dashboard P2P")
 
-# ===================== UI ENCAPSULADA =====================
+cfg = load_config()
+section = sidebar_sections(cfg)
+debug_box()  # ← muestra el JSON si activás el toggle
 
-def run_app():
 
-    cfg = load_config()
-    section = sidebar_sections(cfg)
-    debug_box()  # ← muestra el JSON si activás el toggle
+data = load_data()
+assets = data.get("assets") or {}
+ts = data.get("timestamp","-")
 
-    # usamos la vista "estable" (anti-parpadeo) para los assets del panel
-    assets = load_views_or_fallback() or {}
+if section == "Operar":
+    st.markdown(f"# Dashboard P2P — <span style='color:#999'>actualizado {ts}</span>", unsafe_allow_html=True)
 
-    # timestamp lo tomamos del JSON crudo (si existe)
-    raw = _safe_read_json()
-    ts = raw.get("timestamp", "-") if isinstance(raw, dict) else "-"
+    pinned = st.session_state.get("pinned_asset")
+    hide_others = st.session_state.get("hide_others", False)
+    compact_others = st.session_state.get("compact_others", True)
 
-    if section == "Operar":
-        st.markdown(f"# Dashboard P2P — <span style='color:#999'>actualizado {ts}</span>", unsafe_allow_html=True)
+    if pinned and pinned in ASSETS and assets.get(pinned):
+        card_expanded(pinned, assets[pinned])
 
-        pinned = st.session_state.get("pinned_asset")
-        hide_others = st.session_state.get("hide_others", False)
-        compact_others = st.session_state.get("compact_others", True)
-
-        if pinned and pinned in ASSETS and assets.get(pinned):
-            card_expanded(pinned, assets[pinned])
-
-        others = [a for a in ASSETS if a != pinned]
-        if not pinned:
-            cols = st.columns(2)
-            for i, a in enumerate(ASSETS):
-                with cols[i % 2]:
+    others = [a for a in ASSETS if a != pinned]
+    if not pinned:
+        cols = st.columns(2)
+        for i, a in enumerate(ASSETS):
+            with cols[i % 2]:
+                card_compact(a, assets.get(a) or {})
+    else:
+        if not hide_others:
+            st.markdown("#### Otros activos")
+            cols = st.columns(3 if compact_others else 2)
+            for i, a in enumerate(others):
+                with cols[i % (3 if compact_others else 2)]:
                     card_compact(a, assets.get(a) or {})
-        else:
-            if not hide_others:
-                st.markdown("#### Otros activos")
-                cols = st.columns(3 if compact_others else 2)
-                for i, a in enumerate(others):
-                    with cols[i % (3 if compact_others else 2)]:
-                        card_compact(a, assets.get(a) or {})
 
-        st.divider()
-        _append_history_snapshot()
-        render_history(seconds_window=1800)
+    st.divider()
+    _append_history_snapshot()
+    render_history(seconds_window=1800)
 
-        if st.session_state.get("auto_update", True):
-            try:
-                time.sleep(max(2, int(st.session_state.get("refresh_sec", int(cfg.get("refresh_sec", 8))))))
-            except Exception:
-                time.sleep(8)
-            st.rerun()
+    if st.session_state.get("auto_update", True):
+        try:
+            time.sleep(max(2, int(st.session_state.get("refresh_sec", int(cfg.get("refresh_sec", 8))))))
+        except Exception:
+            time.sleep(8)
+        st.rerun()
 
-    elif section == "Configuraciones":
-        st.markdown("# Configuraciones")
-        st.info("Ajustá parámetros del scanner y del panel desde la izquierda.")
+elif section == "Configuraciones":
+    st.markdown("# Configuraciones")
+    st.info("Ajustá parámetros del scanner y del panel desde la izquierda.")
 
-    elif section == "Alertas":
-        st.markdown("# Alertas")
-        st.info("Umbrales y volúmenes de audio editables desde la izquierda.")
+elif section == "Alertas":
+    st.markdown("# Alertas")
+    st.info("Umbrales y volúmenes de audio editables desde la izquierda.")
 
-    elif section == "Monitoreo & registro":
-        st.markdown("# Monitoreo & registro")
-        if st.session_state.get("generate_report_now"):
-            _generate_report()
-            st.session_state["generate_report_now"] = False
-        st.divider()
-        st.subheader("🕒 Spreads (histórico)")
-        render_history(seconds_window=1800)
+elif section == "Monitoreo & registro":
+    st.markdown("# Monitoreo & registro")
+    if st.session_state.get("generate_report_now"):
+        _generate_report()
+        st.session_state["generate_report_now"] = False
+    st.divider()
+    st.subheader("🕒 Spreads (histórico)")
+    render_history(seconds_window=1800)
+import streamlit as st
+st.sidebar.caption("ScannerBot v0.1.0-beta.1")
 
-    # footer lateral y utilidades inyectadas dentro de la UI
-    st.sidebar.caption("ScannerBot v0.1.0-beta.1")
+# caption diag removida
+# injected: spread helper label
+def _fmt_spread(x):
+    return 'n/a' if x is None else f"{x:.2f}%"
 
-    # injected: spread helper label
-    def _fmt_spread(x):
-        return 'n/a' if x is None else f"{x:.2f}%"
+# injected: gentle autorefresh
+import streamlit as st
+st.autorefresh(interval=3000, key="refresh")
 
-
-
-    # injected: data banner
-    try:
-        _raw = _safe_read_json()
-        _ts = _raw.get("timestamp") if isinstance(_raw, dict) else None
-        import datetime as _dt, time as _t
-        _age = None
-        if _ts:
-            _dt_ts = _dt.datetime.strptime(_ts, "%Y-%m-%d %H:%M:%S")
-            _age = int(_t.time() - _dt_ts.timestamp())
-        if _ts:
-            st.caption(f"data.json actualizado: {_ts}  |  edad: {_age}s")
-    except Exception:
-        pass
-
-# ================== FIN UI ENCAPSULADA ====================
-
-# Ejecutar UI solo si se corre con `streamlit run`
-if __name__ == "__main__":
-    run_app()
+# injected: data banner
+try:
+    _raw = _safe_read_json()
+    _ts = _raw.get("timestamp") if isinstance(_raw, dict) else None
+    import datetime as _dt, time as _t
+    _age = None
+    if _ts:
+        _dt_ts = _dt.datetime.strptime(_ts, "%Y-%m-%d %H:%M:%S")
+        _age = int(_t.time() - _dt_ts.timestamp())
+    if _ts:
+        st.caption(f"data.json actualizado: {_ts}  |  edad: {_age}s")
+except Exception:
+    pass

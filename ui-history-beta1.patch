@@ -1,0 +1,432 @@
+From eeb34524f904faacbe37ed484a34ea1181e23cd7 Mon Sep 17 00:00:00 2001
+From: Martin Ferrer <ferrermartinn@gmail.com>
+Date: Sun, 2 Nov 2025 22:20:52 -0300
+Subject: [PATCH] =?UTF-8?q?UI:=20encapsular=20run=5Fapp(),=20snapshot=20hi?=
+ =?UTF-8?q?st=C3=B3rico=20y=20gr=C3=A1fico;=20status=20sidebar;=20filtros?=
+ =?UTF-8?q?=20de=20pago;=20fixes=20de=20ejecuci=C3=B3n?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ app/ui/dashboard.py | 337 ++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 265 insertions(+), 72 deletions(-)
+
+diff --git a/app/ui/dashboard.py b/app/ui/dashboard.py
+index 6fb30a4..7fdb9dc 100644
+--- a/app/ui/dashboard.py
++++ b/app/ui/dashboard.py
+@@ -1,4 +1,3 @@
+-
+ # -*- coding: utf-8 -*-
+ """
+ Dashboard P2P — v3.4.2
+@@ -6,17 +5,148 @@ Dashboard P2P — v3.4.2
+ - Posicionamiento inteligente + Anti-persecución configurables
+ """
+ 
+-import json, os, time
+-from typing import Dict, Any, List, Optional, Tuple
++import os, json, time
++import tempfile
++from pathlib import Path
+ 
+ import streamlit as st
+ import altair as alt
+ import pandas as pd
++from typing import Any, Dict, List, Optional, Tuple
+ 
+-import os, json
+-# === injected: pay types controls ===
+-from pathlib import Path
+-import json, tempfile, os, streamlit as st
++
++
++st.set_page_config(layout="wide", page_title="Dashboard P2P")
++
++
++def _append_history_snapshot():
++    """Agrega una fila por activo al archivo historico_spreads_v2.json."""
++    import json, os, time
++    DATA = os.path.join(DATA_DIR, "data.json")
++    HIST = os.path.join(DATA_DIR, "historico_spreads_v2.json")
++
++    # lee estado actual
++    try:
++        d = json.load(open(DATA, "r", encoding="utf-8"))
++    except Exception:
++        return
++    assets = (d.get("assets") or {})
++    ts = d.get("timestamp") or time.strftime("%Y-%m-%d %H:%M:%S")
++
++    rows = []
++    for a, v in assets.items():
++        sp = v.get("spread_percent") or v.get("spread_pct")
++        try:
++            if isinstance(sp, str):
++                sp = float(str(sp).replace("%",""))
++            if isinstance(sp, (int, float)):
++                rows.append({"datetime": ts, "asset": a, "spread": float(sp)})
++        except Exception:
++            pass
++
++    # carga lo existente y agrega
++    try:
++        hist = json.load(open(HIST, "r", encoding="utf-8"))
++        if not isinstance(hist, list):
++            hist = []
++    except Exception:
++        hist = []
++    hist = [x for x in hist if isinstance(x, dict)] + rows
++    hist = hist[-5000:]  # límite
++    tmp = HIST + ".tmp"
++    open(tmp, "w", encoding="utf-8").write(json.dumps(hist, ensure_ascii=False, indent=2))
++    os.replace(tmp, HIST)
++
++
++def load_history_last_minutes(minutes: int = 30) -> pd.DataFrame:
++    # lector robusto de histórico
++    raw = read_json(HIST_FILE, []) or []
++    # Acepta list[dict] o dict con {rows|data|items|history:[...]}
++    if isinstance(raw, dict):
++        for k in ("rows","data","items","history"):
++            v = raw.get(k)
++            if isinstance(v, list):
++                raw = v
++                break
++        else:
++            raw = []
++    # Filtrar solo dicts
++    rows = [r for r in raw if isinstance(r, dict)]
++    if not rows:
++        return pd.DataFrame(columns=["datetime","asset","spread"])
++
++    # Construcción segura
++    try:
++        df = pd.DataFrame.from_records(rows)
++    except Exception:
++        return pd.DataFrame(columns=["datetime","asset","spread"])
++
++    if "datetime" not in df.columns:
++        return pd.DataFrame(columns=["datetime","asset","spread"])
++
++    # Parseo de fechas y ventana móvil
++    try:
++        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True).dt.tz_convert(None)
++    except Exception:
++        return pd.DataFrame(columns=["datetime","asset","spread"])
++
++    df = df.dropna(subset=["datetime"])
++    tmin = pd.Timestamp.utcnow() - pd.Timedelta(minutes=minutes)
++    df = df[df["datetime"] >= tmin.tz_localize(None)]
++
++    # Orden y columnas mínimas
++    keep = [c for c in ("datetime","asset","spread") if c in df.columns]
++    df = df[keep].sort_values("datetime")
++    return df
++
++# injected: pandas DataFrame guard for scalar dicts
++
++
++_DATA = Path("/app/data/data.json")
++
++def _safe_read_json(max_tries: int = 6, delay: float = 0.20):
++    for _ in range(max_tries):
++        try:
++            with _DATA.open("r", encoding="utf-8") as fh:
++                return json.load(fh)
++        except Exception:
++            time.sleep(delay)
++    return None
++
++def _view_defaults(v: dict) -> dict:
++    v = v or {}
++    v.setdefault("competitor_buy",  {"nickName": "-", "price": None})
++    v.setdefault("competitor_sell", {"nickName": "-", "price": None})
++    v.setdefault("spread_percent",  None)
++    v.setdefault("my_buy_hint",     None)
++    v.setdefault("my_sell_hint",    None)
++    v.setdefault("meta", {})
++    v["meta"].setdefault("buy_count", 0)
++    v["meta"].setdefault("sell_count", 0)
++    v["meta"].setdefault("b_med", None)
++    v["meta"].setdefault("s_med", None)
++    return v
++
++def load_views_or_fallback():
++    # Lee data.json con reintentos; si falla, usa la última muestra buena
++    data = _safe_read_json()
++    now = time.time()
++
++    if data and isinstance(data, dict):
++        ts_ok = True
++        try:
++            import datetime as _dt
++            t = _dt.datetime.strptime(data.get("timestamp","1970-01-01 00:00:00"), "%Y-%m-%d %H:%M:%S")
++            ts_ok = (now - t.timestamp()) < 20
++        except Exception:
++            ts_ok = True
++
++        if ts_ok and "assets" in data:
++            views = {a: _view_defaults(v) for a, v in data["assets"].items()}
++            st.session_state["_last_good_views"] = views
++            return views
++
++    return st.session_state.get("_last_good_views", {})
+ 
+ _CFG_PATH = Path("/app/data/config.json")
+ 
+@@ -97,7 +227,7 @@ def get_asset(name: str):
+ 
+ DATA_FILE   = os.path.join(DATA_DIR, "data.json")
+ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+-HIST_FILE   = os.path.join(DATA_DIR, "historico_spreads.json")
++HIST_FILE   = os.path.join(DATA_DIR, "historico_spreads_v2.json")
+ 
+ 
+ ASSETS = ["USDT", "BTC", "ETH", "XRP"]
+@@ -193,6 +323,18 @@ def as_float(x) -> Optional[float]:
+     except Exception:
+         return None
+ 
++
++def _apply_my_suggest(info: dict, cfg: dict):
++    try:
++        b = float((info.get("competitor_buy")  or {}).get("price"))
++        s = float((info.get("competitor_sell") or {}).get("price"))
++        tick = float(cfg.get("price_delta_abs", 0.01))
++        info["my_suggest_buy"]  = round(b + tick, 2)
++        info["my_suggest_sell"] = round(s - tick, 2)
++    except Exception:
++        pass
++
++
+ def fmt_price(x) -> str:
+     try:
+         v = float(x)
+@@ -421,6 +563,7 @@ def card_compact(asset: str, info: dict):
+     with st.container(border=True):
+         spread = info.get("spread_pct") or info.get("spread_percent")
+         header_asset(asset, spread)
++        _apply_my_suggest(info, load_config())
+         render_blocks(info)
+         c = st.columns([1,2,3])
+         with c[0]:
+@@ -434,6 +577,7 @@ def card_expanded(asset: str, info: dict):
+     with st.container(border=True):
+         spread = info.get("spread_pct") or info.get("spread_percent")
+         header_asset(asset, spread)
++        _apply_my_suggest(info, load_config())
+         render_blocks(info)
+         row = st.columns([1,3,3,3])
+         with row[0]:
+@@ -446,21 +590,43 @@ def card_expanded(asset: str, info: dict):
+         with st.expander("📊 Sizing & PnL"):
+             _sizing_panel(asset, info)
+ 
++# ===== versión simple preservada sin borrar, renombrada para no sobrescribir =====
+ def load_history_last_minutes(minutes: int = 30) -> pd.DataFrame:
++    # lector robusto de histórico
+     raw = read_json(HIST_FILE, []) or []
+-    if not raw:
+-        return pd.DataFrame(columns=["datetime","asset","spread"])
+-    df = pd.DataFrame(raw)
++    # Acepta list[dict] o dict con {rows|data|items|history:[...]}
++    if isinstance(raw, dict):
++        for k in ("rows", "data", "items", "history"):
++            v = raw.get(k)
++            if isinstance(v, list):
++                raw = v
++                break
++        else:
++            raw = []
++    rows = [r for r in raw if isinstance(r, dict)]
++    if not rows:
++        return pd.DataFrame(columns=["datetime", "asset", "spread"])
++
++    try:
++        df = pd.DataFrame.from_records(rows)
++    except Exception:
++        return pd.DataFrame(columns=["datetime", "asset", "spread"])
++
+     if "datetime" not in df.columns:
+-        return pd.DataFrame(columns=["datetime","asset","spread"])
++        return pd.DataFrame(columns=["datetime", "asset", "spread"])
++
+     try:
+-        df["datetime"] = pd.to_datetime(df["datetime"])
++        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True).dt.tz_convert(None)
+     except Exception:
+-        return pd.DataFrame(columns=["datetime","asset","spread"])
++        return pd.DataFrame(columns=["datetime", "asset", "spread"])
++
++    df = df.dropna(subset=["datetime"])
+     tmin = pd.Timestamp.utcnow() - pd.Timedelta(minutes=minutes)
+     df = df[df["datetime"] >= tmin.tz_localize(None)]
+-    return df.sort_values("datetime")
++    keep = [c for c in ("datetime", "asset", "spread") if c in df.columns]
++    return df[keep].sort_values("datetime")
+ 
++# ================================================================================
+ def render_history(seconds_window: int = 1800):
+     st.subheader("🕒 Spreads últimos 30 minutos")
+     df = load_history_last_minutes(minutes=seconds_window//60)
+@@ -695,71 +861,98 @@ def _generate_report():
+         "P&L est. (ARS)": "{:,.0f}"
+     }), use_container_width=True)
+ 
+-st.set_page_config(layout="wide", page_title="Dashboard P2P")
+ 
+-cfg = load_config()
+-section = sidebar_sections(cfg)
+-debug_box()  # ← muestra el JSON si activás el toggle
++# ===================== UI ENCAPSULADA =====================
+ 
++def run_app():
+ 
+-data = load_data()
+-assets = data.get("assets") or {}
+-ts = data.get("timestamp","-")
++    cfg = load_config()
++    section = sidebar_sections(cfg)
++    debug_box()  # ← muestra el JSON si activás el toggle
+ 
+-if section == "Operar":
+-    st.markdown(f"# Dashboard P2P — <span style='color:#999'>actualizado {ts}</span>", unsafe_allow_html=True)
++    data = load_data()
++    assets = data.get("assets") or {}
++    ts = data.get("timestamp","-")
+ 
+-    pinned = st.session_state.get("pinned_asset")
+-    hide_others = st.session_state.get("hide_others", False)
+-    compact_others = st.session_state.get("compact_others", True)
++    if section == "Operar":
++        st.markdown(f"# Dashboard P2P — <span style='color:#999'>actualizado {ts}</span>", unsafe_allow_html=True)
+ 
+-    if pinned and pinned in ASSETS and assets.get(pinned):
+-        card_expanded(pinned, assets[pinned])
++        pinned = st.session_state.get("pinned_asset")
++        hide_others = st.session_state.get("hide_others", False)
++        compact_others = st.session_state.get("compact_others", True)
+ 
+-    others = [a for a in ASSETS if a != pinned]
+-    if not pinned:
+-        cols = st.columns(2)
+-        for i, a in enumerate(ASSETS):
+-            with cols[i % 2]:
+-                card_compact(a, assets.get(a) or {})
+-    else:
+-        if not hide_others:
+-            st.markdown("#### Otros activos")
+-            cols = st.columns(3 if compact_others else 2)
+-            for i, a in enumerate(others):
+-                with cols[i % (3 if compact_others else 2)]:
++        if pinned and pinned in ASSETS and assets.get(pinned):
++            card_expanded(pinned, assets[pinned])
++
++        others = [a for a in ASSETS if a != pinned]
++        if not pinned:
++            cols = st.columns(2)
++            for i, a in enumerate(ASSETS):
++                with cols[i % 2]:
+                     card_compact(a, assets.get(a) or {})
++        else:
++            if not hide_others:
++                st.markdown("#### Otros activos")
++                cols = st.columns(3 if compact_others else 2)
++                for i, a in enumerate(others):
++                    with cols[i % (3 if compact_others else 2)]:
++                        card_compact(a, assets.get(a) or {})
++
++        st.divider()
++        _append_history_snapshot()
++        render_history(seconds_window=1800)
++
++        if st.session_state.get("auto_update", True):
++            try:
++                time.sleep(max(2, int(st.session_state.get("refresh_sec", int(cfg.get("refresh_sec", 8))))))
++            except Exception:
++                time.sleep(8)
++            st.rerun()
++
++    elif section == "Configuraciones":
++        st.markdown("# Configuraciones")
++        st.info("Ajustá parámetros del scanner y del panel desde la izquierda.")
++
++    elif section == "Alertas":
++        st.markdown("# Alertas")
++        st.info("Umbrales y volúmenes de audio editables desde la izquierda.")
++
++    elif section == "Monitoreo & registro":
++        st.markdown("# Monitoreo & registro")
++        if st.session_state.get("generate_report_now"):
++            _generate_report()
++            st.session_state["generate_report_now"] = False
++        st.divider()
++        st.subheader("🕒 Spreads (histórico)")
++        render_history(seconds_window=1800)
+ 
+-    st.divider()
+-    render_history(seconds_window=1800)
++    # footer lateral y utilidades inyectadas dentro de la UI
++    st.sidebar.caption("ScannerBot v0.1.0-beta.1")
+ 
+-    if st.session_state.get("auto_update", True):
+-        try:
+-            time.sleep(max(2, int(st.session_state.get("refresh_sec", int(cfg.get("refresh_sec", 8))))))
+-        except Exception:
+-            time.sleep(8)
+-        st.rerun()
++    # injected: spread helper label
++    def _fmt_spread(x):
++        return 'n/a' if x is None else f"{x:.2f}%"
+ 
+-elif section == "Configuraciones":
+-    st.markdown("# Configuraciones")
+-    st.info("Ajustá parámetros del scanner y del panel desde la izquierda.")
+-
+-elif section == "Alertas":
+-    st.markdown("# Alertas")
+-    st.info("Umbrales y volúmenes de audio editables desde la izquierda.")
+-
+-elif section == "Monitoreo & registro":
+-    st.markdown("# Monitoreo & registro")
+-    if st.session_state.get("generate_report_now"):
+-        _generate_report()
+-        st.session_state["generate_report_now"] = False
+-    st.divider()
+-    st.subheader("🕒 Spreads (histórico)")
+-    render_history(seconds_window=1800)
+-import streamlit as st
+-st.sidebar.caption("ScannerBot v0.1.0-beta.1")
+-# injected: meta diag
+-try:
+-    st.caption(f"Top usados: buy={view.get('meta',{}).get('buy_count','-')} sell={view.get('meta',{}).get('sell_count','-')}  |  mediana: buy={view.get('meta',{}).get('b_med','-')} sell={view.get('meta',{}).get('s_med','-')}")
+-except Exception:
+-    pass
++    # injected: gentle autorefresh
++    
++    st.autorefresh(interval=3000, key="refresh")
++
++    # injected: data banner
++    try:
++        _raw = _safe_read_json()
++        _ts = _raw.get("timestamp") if isinstance(_raw, dict) else None
++        import datetime as _dt, time as _t
++        _age = None
++        if _ts:
++            _dt_ts = _dt.datetime.strptime(_ts, "%Y-%m-%d %H:%M:%S")
++            _age = int(_t.time() - _dt_ts.timestamp())
++        if _ts:
++            st.caption(f"data.json actualizado: {_ts}  |  edad: {_age}s")
++    except Exception:
++        pass
++
++# ================== FIN UI ENCAPSULADA ====================
++
++# Ejecutar UI solo si se corre con `streamlit run`
++if __name__ == "__main__":
++    run_app()
+-- 
+2.51.2.windows.1
+

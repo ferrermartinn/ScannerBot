@@ -1,0 +1,12 @@
+services:
+  scanner:
+    command: ["python","-u","-m","app.service.scanner_p2p"]
+    working_dir: /app
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+    volumes:
+      - ./app:/app/app
+    # importante: forzar que NO exponga puertos
+    ports: []
