@@ -16,15 +16,6 @@ from app.service.effective_liquidity import effective_metrics
 from app.strategy.triangular_arbitrage import calculate_triangular_arbitrage
 from app.strategy.triangular_arbitrage import fetch_spot_btcusdt
 
-# ====== stub de sonidos (por si no existe el módulo) ======
-try:
-    import sonidos  # type: ignore
-except Exception:
-    class _Silent:
-        def play(*a, **k):
-            pass
-    sonidos = _Silent()
-
 # ====== pay filter + extractor ======
 def _passes_pay_filter(item: dict, pay_types):
     if not pay_types:
@@ -36,30 +27,9 @@ def _passes_pay_filter(item: dict, pay_types):
     needles = [str(x).lower() for x in pay_types if x]
     return any(n in blob for n in needles)
 
-
-def _is_verified_merchant(item: dict) -> bool:
-    """
-    Intenta detectar si el anuncio es de un comerciante verificado de Binance.
-    Usa distintos campos porque el JSON puede variar un poco.
-    """
-    adv = (item.get("advertiser") or item.get("adv") or {})
-    if not isinstance(adv, dict):
-        return False
-
-    # flags típicos
-    if adv.get("isMerchant") or adv.get("proMerchant") or adv.get("isVerifiedMerchant"):
-        return True
-
-    user_type = str(adv.get("userType") or "").lower()
-    if user_type in ("merchant", "promerchant"):
-        return True
-
-    return False
-
-
 def _extract_price_nick_fallback(item: dict):
     price = None
-    nick = "-"
+    nick  = "-"
     try:
         adv = item.get("adv") or {}
         p = adv.get("price") or adv.get("advPrice") or adv.get("priceFloat")
@@ -75,32 +45,21 @@ def _extract_price_nick_fallback(item: dict):
     return price, nick
 
 # ====== ENV / PATHS ======
-# ====== ENV / PATHS ======
-from pathlib import Path
-
-# Raíz del proyecto: .../ScannerBot
-ROOT_DIR = Path(__file__).resolve().parents[2]
-
-# DATA_DIR:
-# - Si hay env DATA_DIR (Docker), lo usa.
-# - Si no, usa la carpeta local del proyecto: ScannerBot/data
-DATA_DIR = os.getenv("DATA_DIR") or str(ROOT_DIR / "data")
-
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-CONFIG_FILE         = os.path.join(DATA_DIR, "config.json")
-DATA_FILE           = os.path.join(DATA_DIR, "data.json")
-HISTORICO_FILE      = os.path.join(DATA_DIR, "historico_spreads.json")
-HISTORICO_SNAP_FILE = os.path.join(DATA_DIR, "historico_snapshots.json")
-STATE_FILE          = os.path.join(DATA_DIR, "state.json")
-
+CONFIG_FILE          = os.path.join(DATA_DIR, "config.json")
+DATA_FILE            = os.path.join(DATA_DIR, "data.json")
+HISTORICO_FILE       = os.path.join(DATA_DIR, "historico_spreads.json")
+HISTORICO_SNAP_FILE  = os.path.join(DATA_DIR, "historico_snapshots.json")
+STATE_FILE           = os.path.join(DATA_DIR, "state.json")
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()],
+    handlers=[logging.StreamHandler()]
 )
 log = logging.getLogger("scanner_p2p")
 
@@ -122,16 +81,15 @@ DEFAULT_CONFIG = {
     "allow_sim": True,
     "positioning": {"window_s": 60, "dumping_drop_pct": 0.006, "debounce_s": 45},
 }
-
 ASSETS = ["USDT", "BTC", "ETH", "XRP"]
 
 # ====== HEADERS / P2P ======
 BINANCE_P2P_URL = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 ENV_HEADERS = {
     "Content-Type": os.getenv("P2P_CONTENT_TYPE", "application/json"),
-    "User-Agent": os.getenv("P2P_USER_AGENT", "Mozilla/5.0"),
-    "clienttype": os.getenv("P2P_CLIENTTYPE", "web"),
-    "platform": os.getenv("P2P_PLATFORM", "web"),
+    "User-Agent":   os.getenv("P2P_USER_AGENT",   "Mozilla/5.0"),
+    "clienttype":   os.getenv("P2P_CLIENTTYPE",   "web"),
+    "platform":     os.getenv("P2P_PLATFORM",     "web"),
 }
 DEFAULT_HEADERS = {
     "Accept": "application/json",
@@ -191,27 +149,16 @@ def _as_float(x) -> Optional[float]:
 def norm_name(ad: dict) -> str:
     adv = (ad or {}).get("advertiser") or (ad or {}).get("advertiserVo") or {}
     return _pick(
-        adv.get("nickName"),
-        adv.get("userName"),
-        (ad or {}).get("nickName"),
-        (ad or {}).get("advertiserName"),
-        (ad or {}).get("username"),
-        (ad or {}).get("name"),
-        (ad or {}).get("title"),
-        (ad or {}).get("label"),
-        default="-",
+        adv.get("nickName"), adv.get("userName"),
+        (ad or {}).get("nickName"), (ad or {}).get("advertiserName"),
+        (ad or {}).get("username"), (ad or {}).get("name"),
+        (ad or {}).get("title"), (ad or {}).get("label"), default="-",
     )
 
 def norm_price(ad: dict) -> Optional[float]:
     adv = (ad or {}).get("adv") or {}
-    return _as_float(
-        _pick(
-            adv.get("price"),
-            (ad or {}).get("price"),
-            (ad or {}).get("floatPrice"),
-            (ad or {}).get("amount"),
-        )
-    )
+    return _as_float(_pick(adv.get("price"), (ad or {}).get("price"),
+                           (ad or {}).get("floatPrice"), (ad or {}).get("amount")))
 
 def norm_row(ad: dict) -> dict:
     adv = (ad or {}).get("adv") or {}
@@ -262,38 +209,43 @@ def is_verified_ad(ad: dict) -> bool:
 
 # ====== Binance P2P ======
 def binance_p2p_query(asset: str, trade_type: str, fiat: str, pay_types: List[str]) -> List[dict]:
-    """
-    Lee hasta 3 páginas de resultados (3 x 20 = 60 anuncios).
-    """
     payload = {
-        "asset": asset,
-        "tradeType": trade_type,
-        "fiat": fiat,
-        "page": 1,
-        "rows": 20,
-        "payTypes": pay_types or [],
-        "publisherType": None,
+        "asset": asset, "tradeType": trade_type, "fiat": fiat,
+        "page": 1, "rows": 20, "payTypes": pay_types or [], "publisherType": None
     }
-
-    all_ads: List[dict] = []
-
     try:
-        for page in range(1, 4):  # páginas 1, 2 y 3
-            payload["page"] = page
-            r = requests.post(BINANCE_P2P_URL, headers=HEADERS, json=payload, timeout=15)
-            r.raise_for_status()
-            data = (r.json() or {}).get("data") or []
-            all_ads.extend(data)
-
-            # si devuelve menos que "rows", ya no hay más páginas útiles
-            if len(data) < payload["rows"]:
-                break
-
+        r = requests.post(BINANCE_P2P_URL, headers=HEADERS, json=payload, timeout=15)
+        r.raise_for_status()
+        return (r.json() or {}).get("data") or []
     except Exception as e:
         log.warning(f"[P2P] Falla consulta {asset}/{trade_type}: {e}")
+        return []
 
-    return all_ads
+# ====== Precios top por asset/fiat usando P2P ======
+def get_market_prices(asset: str, fiat: str, pay_types: list) -> tuple[float | None, float | None]:
+    def _top_price(rows, want="max"):
+        extractor = globals().get("_extract_price_nick", _extract_price_nick_fallback)
+        prices = []
+        for it in rows or []:
+            try:
+                p, _ = extractor(it)
+            except Exception:
+                p, _ = _extract_price_nick_fallback(it)
+            if p is not None:
+                prices.append(float(p))
+        if not prices:
+            return None
+        return (max(prices) if want == "max" else min(prices))
 
+    try:
+        buy_raw  = binance_p2p_query(asset, "BUY",  fiat, [])
+        sell_raw = binance_p2p_query(asset, "SELL", fiat, [])
+        top_buy  = _top_price(buy_raw, "max")
+        top_sell = _top_price(sell_raw, "min")
+        return top_buy, top_sell
+    except Exception as e:
+        log.warning(f"[get_market_prices] {asset}/{fiat} error: {e}")
+        return None, None
 
 # ====== Simulador ======
 def sim_rows(asset: str, side: str, n: int = 10) -> List[dict]:
@@ -310,17 +262,13 @@ def sim_rows(asset: str, side: str, n: int = 10) -> List[dict]:
         })
     return rows
 
-# ====== Sonidos ======
+# ====== Sonidos (silenciado por defecto) ======
 def play_sound(kind: str, cfg: dict):
     if cfg.get("mute_alerts", True):
         return
     try:
-        keymap = {
-            "oportunidad": "alerta_rentable",
-            "precio": "alerta_precio",
-            "caida": "alerta_caida",
-            "vibrido": "alerta_vibrido",
-        }
+        import sonidos  # tipo local opcional
+        keymap = {"oportunidad":"alerta_rentable","precio":"alerta_precio","caida":"alerta_caida","vibrido":"alerta_vibrido"}
         vol = float((cfg.get("vol_sounds") or {}).get(keymap.get(kind, "alerta_rentable"), 0.5))
         sonidos.play(kind, volume=vol)
     except Exception:
@@ -330,9 +278,7 @@ def play_sound(kind: str, cfg: dict):
 def build_asset_view(asset: str, cfg: dict) -> dict:
     fiat = cfg.get("fiat", "ARS")
     pay_types = cfg.get("pay_types") or []
-    verified_only = bool(cfg.get("verified_only", False))
 
-    # 1) Traer crudo desde Binance (3 páginas por lado)
     try:
         buy_raw  = binance_p2p_query(asset, "BUY",  fiat, [])
         sell_raw = binance_p2p_query(asset, "SELL", fiat, [])
@@ -340,35 +286,18 @@ def build_asset_view(asset: str, cfg: dict) -> dict:
         log.warning(f"[build_asset_view] query error: {e}")
         buy_raw, sell_raw = [], []
 
-    # 2) Filtro por merchant verificado (config + heurísticas)
-    # 2) Filtro por merchant verificado (config + heurísticas) con fallback
-    if verified_only:
-        orig_buy, orig_sell = buy_raw[:], sell_raw[:]
-
-        filtered_buy = [it for it in buy_raw  if is_verified_ad(it) or _is_verified_merchant(it)]
-        filtered_sell = [it for it in sell_raw if is_verified_ad(it) or _is_verified_merchant(it)]
-
-        # Si encontramos al menos un verificado, usamos solo esos
-        if filtered_buy or filtered_sell:
-            buy_raw, sell_raw = filtered_buy, filtered_sell
-        else:
-            log.warning(f"[{asset}] sin merchants verificados, usando anuncios normales")
-            buy_raw, sell_raw = orig_buy, orig_sell
-
-
-    # 3) Filtro suave por métodos de pago (texto)
     buy_raw  = [it for it in buy_raw  if _passes_pay_filter(it, pay_types)]
     sell_raw = [it for it in sell_raw if _passes_pay_filter(it, pay_types)]
 
+    buyers_table, sellers_table = [], []
+
     def _accept_row(ad: dict) -> bool:
-        # verificado ya se filtró arriba si corresponde
+        if cfg.get("verified_only") and not is_verified_ad(ad):
+            return False
         name = norm_name(ad)
         if is_blacklisted_name(name, cfg):
             return False
         return True
-
-    buyers_table: List[Dict[str, Any]] = []
-    sellers_table: List[Dict[str, Any]] = []
 
     for it in buy_raw:
         try:
@@ -390,42 +319,48 @@ def build_asset_view(asset: str, cfg: dict) -> dict:
         except Exception:
             pass
 
-    # BUY desc, SELL asc
-    buyers_table = sorted(buyers_table, key=lambda x: x["price"], reverse=True)
+    buyers_table  = sorted(buyers_table,  key=lambda x: x["price"], reverse=True)
     sellers_table = sorted(sellers_table, key=lambda x: x["price"])
 
-    competitor_buy = buyers_table[0] if buyers_table else {"nickName": "-", "price": None}
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug(f"[{asset}] buyers({len(buyers_table)}): {buyers_table[:3]}")
+        log.debug(f"[{asset}] sellers({len(sellers_table)}): {sellers_table[:3]}")
+
+    competitor_buy  = buyers_table[0]  if buyers_table  else {"nickName": "-", "price": None}
     competitor_sell = sellers_table[0] if sellers_table else {"nickName": "-", "price": None}
 
     bprice = competitor_buy.get("price")
     sprice = competitor_sell.get("price")
 
-    # spread visto como "cuánto le gano al libro": compra - venta sobre venta
     spread_percent = None
-    if bprice is None or sprice is None or sprice <= 0:
+    if bprice is None or sprice is None or bprice <= 0:
         log.warning(f"[{asset}] precios inválidos para spread: b={bprice} s={sprice}")
     else:
-        spread_percent = (bprice - sprice) / sprice * 100.0
+        spread_percent = (sprice - bprice) / bprice * 100.0
 
     tick = float(cfg.get("tick", 0.01) or 0.01)
-    buy_undercut = bool(cfg.get("buy_undercut", True))
-    sell_overcut = bool(cfg.get("sell_overcut", True))
+    buy_undercut  = bool(cfg.get("buy_undercut", True))
+    sell_overcut  = bool(cfg.get("sell_overcut", True))
 
-    my_buy_hint = None
+    my_buy_hint  = None
     my_sell_hint = None
     if bprice is not None:
-        my_buy_hint = round((bprice + tick) if buy_undercut else (bprice - tick), 2)
+        my_buy_hint  = round((bprice + tick) if buy_undercut else (bprice - tick), 2)
     if sprice is not None:
         my_sell_hint = round((sprice - tick) if sell_overcut else (sprice + tick), 2)
 
-    # métricas efectivas
     try:
         eff_buy, eff_sell, eff_mid, eff_spread = effective_metrics(
             buyers_table, sellers_table, cfg.get("alert_min_ars", 1500.0)
         )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(f"[{asset}] eff: buy={eff_buy} sell={eff_sell} mid={eff_mid} spread%={eff_spread}")
     except Exception as e:
         log.warning(f"[{asset}] effective_metrics error: {e}")
         eff_buy = eff_sell = eff_mid = eff_spread = None
+
+    top_buy_p2p  = bprice
+    top_sell_p2p = sprice
 
     spot_btcusdt = None
     if asset in ("BTC", "USDT"):
@@ -443,18 +378,15 @@ def build_asset_view(asset: str, cfg: dict) -> dict:
         "spread_percent": spread_percent,
         "my_buy_hint": my_buy_hint,
         "my_sell_hint": my_sell_hint,
-        "my_buy": my_buy_hint,      # <- nombres que suele consumir el dashboard
-        "my_sell": my_sell_hint,
         "effective_buy_price": eff_buy,
         "effective_sell_price": eff_sell,
         "effective_mid": eff_mid,
         "effective_spread_percent": eff_spread,
-        "p2p_top_buy": bprice,
-        "p2p_top_sell": sprice,
+        "p2p_top_buy": top_buy_p2p,
+        "p2p_top_sell": top_sell_p2p,
         "spot_btcusdt": spot_btcusdt,
     }
 
-# ====== Históricos ======
 def append_history_flat(assets_out: Dict[str, Any]):
     hist = safe_read_json(HISTORICO_FILE, [])
     if not isinstance(hist, list):
@@ -467,8 +399,8 @@ def append_history_flat(assets_out: Dict[str, Any]):
             "spread": v.get("spread_percent"),
             "competitor_buy_price": (v.get("competitor_buy") or {}).get("price"),
             "competitor_sell_price": (v.get("competitor_sell") or {}).get("price"),
-            "my_buy": v.get("my_buy"),
-            "my_sell": v.get("my_sell"),
+            "my_buy": v.get("my_buy_hint"),
+            "my_sell": v.get("my_sell_hint"),
         })
     if len(hist) > 4000:
         hist = hist[-2000:]
@@ -496,7 +428,7 @@ _WIN = deque(maxlen=12)
 
 def detect_regime_auto(top_buy, top_sell, now, cfg: dict) -> str:
     pos = cfg.get("positioning", {}) or {}
-    win_s = float(pos.get("window_s", 60))
+    win_s    = float(pos.get("window_s", 60))
     thr_drop = float(pos.get("dumping_drop_pct", 0.006))
     debounce = float(pos.get("debounce_s", 45))
 
@@ -520,7 +452,7 @@ def detect_regime_auto(top_buy, top_sell, now, cfg: dict) -> str:
         _REG["t0"] = now
     return _REG["regime"]
 
-# ====== Loop principal ======
+# ====== Loop ======
 def main_scanner():
     log.info("Iniciando scanner P2P v2.6")
     cfg = load_config()
@@ -541,11 +473,10 @@ def main_scanner():
                     view = {
                         "competitor_buy": {"nickName": "-", "price": None},
                         "competitor_sell": {"nickName": "-", "price": None},
-                        "my_buy": None,
-                        "my_sell": None,
+                        "my_buy_hint": None,
+                        "my_sell_hint": None,
                         "spread_percent": None,
-                        "sellers_table": [],
-                        "buyers_table": [],
+                        "sellers_table": [], "buyers_table": [],
                     }
                 assets_out[asset] = view
 
@@ -557,58 +488,41 @@ def main_scanner():
                 st_a = state.get(asset, {})
                 spread = v.get("spread_percent")
                 comp_sell_price = (v.get("competitor_sell") or {}).get("price")
-                comp_buy_price = (v.get("competitor_buy") or {}).get("price")
+                comp_buy_price  = (v.get("competitor_buy")  or {}).get("price")
 
-                my_buy = v.get("my_buy")
-                my_sell = v.get("my_sell")
-
-                top_buy = (my_buy is not None) and (comp_buy_price is not None) and (my_buy >= comp_buy_price - 1e-9)
+                my_buy  = v.get("my_buy_hint")
+                my_sell = v.get("my_sell_hint")
+                top_buy  = (my_buy  is not None) and (comp_buy_price  is not None) and (my_buy  >= comp_buy_price  - 1e-9)
                 top_sell = (my_sell is not None) and (comp_sell_price is not None) and (my_sell <= comp_sell_price + 1e-9)
 
                 thr = float(thr_map.get(asset, cfg.get("alert_spread_pct", 1.0)))
                 was_alert = bool(st_a.get("alert"))
-                is_alert = (spread is not None) and (spread >= thr)
+                is_alert  = (spread is not None) and (spread >= thr)
                 if is_alert and not was_alert:
                     play_sound("oportunidad", cfg)
 
-                was_top_buy = bool(st_a.get("top_buy"))
+                was_top_buy  = bool(st_a.get("top_buy"))
                 was_top_sell = bool(st_a.get("top_sell"))
-                if top_buy and not was_top_buy:
-                    play_sound("precio", cfg)
-                if not top_buy and was_top_buy:
-                    play_sound("vibrido", cfg)
-                if top_sell and not was_top_sell:
-                    play_sound("precio", cfg)
-                if not top_sell and was_top_sell:
-                    play_sound("vibrido", cfg)
+                if top_buy and not was_top_buy:   play_sound("precio", cfg)
+                if not top_buy and was_top_buy:   play_sound("vibrido", cfg)
+                if top_sell and not was_top_sell: play_sound("precio", cfg)
+                if not top_sell and was_top_sell: play_sound("vibrido", cfg)
 
-                state[asset] = {
-                    "alert": is_alert,
-                    "top_buy": top_buy,
-                    "top_sell": top_sell,
-                    "last_spread": spread,
-                }
+                state[asset] = {"alert": is_alert, "top_buy": top_buy, "top_sell": top_sell, "last_spread": spread}
                 changed = True
 
             if changed:
                 save_state(state)
 
-            data_out = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "fiat": cfg.get("fiat", "ARS"),
-                "assets": assets_out,
-            }
+            data_out = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "fiat": cfg.get("fiat", "ARS"), "assets": assets_out}
             safe_write_json(DATA_FILE, data_out)
             append_history_flat(assets_out)
             append_history_snapshot(assets_out)
 
-            log.info(
-                "tick ok: %s",
-                {
-                    k: (round(v["spread_percent"], 3) if v["spread_percent"] is not None else None)
-                    for k, v in assets_out.items()
-                },
-            )
+            log.info("tick ok: %s",
+                     {k: (round(v["spread_percent"], 3) if v["spread_percent"] is not None else None)
+                      for k, v in assets_out.items()})
 
         except Exception as e:
             log.exception("Fallo en loop principal: %s", e)

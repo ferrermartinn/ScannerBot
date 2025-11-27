@@ -14,9 +14,28 @@ import altair as alt
 import pandas as pd
 from typing import Any, Dict, List, Optional, Tuple
 
+# === Paths compartidos con scanner_p2p ===
+ROOT_DIR = Path(__file__).resolve().parents[2]  # .../ScannerBot
+DATA_DIR = os.getenv("DATA_DIR") or os.path.join(ROOT_DIR, "data")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+DATA_FILE        = os.path.join(DATA_DIR, "data.json")
+CONFIG_FILE      = os.path.join(DATA_DIR, "config.json")
+HIST_FILE        = os.path.join(DATA_DIR, "historico_spreads_v2.json")
+EFFECTIVE_FILE   = os.path.join(DATA_DIR, "data_effective.json")
 
 
 st.set_page_config(layout="wide", page_title="Dashboard P2P")
+
+def load_effective_data():
+    try:
+        with open(EFFECTIVE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        # Si no existe o aún no se genera, no rompemos el dashboard.
+        return {}
+
 
 
 def _append_history_snapshot():
@@ -102,7 +121,8 @@ def load_history_last_minutes(minutes: int = 30) -> pd.DataFrame:
 # injected: pandas DataFrame guard for scalar dicts
 
 
-_DATA = Path("/app/data/data.json")
+_DATA = Path(DATA_FILE)
+
 
 def _safe_read_json(max_tries: int = 6, delay: float = 0.20):
     for _ in range(max_tries):
@@ -128,27 +148,59 @@ def _view_defaults(v: dict) -> dict:
     return v
 
 def load_views_or_fallback():
-    # Lee data.json con reintentos; si falla, usa la última muestra buena
+    """
+    Lee data.json y sólo actualiza la vista si hay datos reales.
+    Si llega un tick vacío (competidor '-' y precios/mesas nulos),
+    mantiene la última muestra buena en session_state para evitar parpadeos.
+    """
     data = _safe_read_json()
     now = time.time()
 
-    if data and isinstance(data, dict):
+    last_views = st.session_state.get("_last_good_views", {})
+
+    if not (data and isinstance(data, dict) and "assets" in data):
+        return last_views
+
+    # chequeo de timestamp
+    ts_ok = True
+    try:
+        import datetime as _dt
+        t = _dt.datetime.strptime(data.get("timestamp", "1970-01-01 00:00:00"),
+                                  "%Y-%m-%d %H:%M:%S")
+        ts_ok = (now - t.timestamp()) < 40  # ventana un poco más amplia
+    except Exception:
         ts_ok = True
-        try:
-            import datetime as _dt
-            t = _dt.datetime.strptime(data.get("timestamp","1970-01-01 00:00:00"), "%Y-%m-%d %H:%M:%S")
-            ts_ok = (now - t.timestamp()) < 20
-        except Exception:
-            ts_ok = True
 
-        if ts_ok and "assets" in data:
-            views = {a: _view_defaults(v) for a, v in data["assets"].items()}
-            st.session_state["_last_good_views"] = views
-            return views
+    assets = data.get("assets") or {}
+    views = {a: _view_defaults(v) for a, v in assets.items()}
 
-    return st.session_state.get("_last_good_views", {})
+    # detecta si hay información "real" en al menos un activo
+    def _has_real_info(v: dict) -> bool:
+        b = (v.get("competitor_buy") or {}).get("price")
+        s = (v.get("competitor_sell") or {}).get("price")
+        sp = v.get("spread_percent") or v.get("spread_pct")
+        sellers = v.get("sellers_table") or []
+        buyers  = v.get("buyers_table") or []
+        if b not in (None, 0, "0") or s not in (None, 0, "0"):
+            return True
+        if sp not in (None, 0, "0", "0.0"):
+            return True
+        if sellers or buyers:
+            return True
+        return False
 
-_CFG_PATH = Path("/app/data/config.json")
+    has_real = any(_has_real_info(v) for v in views.values())
+
+    # sólo si hay datos válidos actualizamos la cache
+    if ts_ok and has_real:
+        st.session_state["_last_good_views"] = views
+        return views
+
+    # si no, devolvemos lo último bueno
+    return last_views
+
+_CFG_PATH = Path(CONFIG_FILE)
+
 
 def _cfg_load_sidebar():
     # fallback sensato si no existe
@@ -203,8 +255,6 @@ def sidebar_paytypes_controls():
         st.sidebar.success("Filtro guardado")
         st.rerun()
 
-DATA_DIR = os.getenv("DASHBOARD_DATA_PATH", "/app/data")
-DATA_FILE = os.path.join(DATA_DIR, "data.json")
 
 # Debug rápido desde UI
 def debug_box():
@@ -213,7 +263,8 @@ def debug_box():
     if dbg:
         st.subheader("Debug: data.json leído por el dashboard")
         st.caption("Confirma que 'assets → USDT → competitor_*' tiene datos.")
-        st.json(load_data())
+        st.json(_safe_read_json() or {})
+
 
 
 def load_data():
@@ -223,12 +274,6 @@ def load_data():
 def get_asset(name: str):
     d = load_data()
     return d["assets"].get(name, {})
-
-
-DATA_FILE   = os.path.join(DATA_DIR, "data.json")
-CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-HIST_FILE   = os.path.join(DATA_DIR, "historico_spreads_v2.json")
-
 
 ASSETS = ["USDT", "BTC", "ETH", "XRP"]
 
@@ -513,19 +558,26 @@ def _sizing_panel(asset: str, info: dict):
 # --- Status de data.json en sidebar ---
 import os, json, time, streamlit as st
 
-def _file_health(path="/app/data/data.json"):
+# --- Status de data.json en sidebar ---
+import os as _os, json as _json, time as _time
+
+def _file_health(path: str | None = None):
+    """Muestra salud del mismo archivo que usa el dashboard (DATA_FILE)."""
     try:
-        stt = os.stat(path)
-        d = json.load(open(path, "r", encoding="utf-8"))
+        path = path or DATA_FILE  # usamos el DATA_FILE global
+        stt = _os.stat(path)
+        with open(path, "r", encoding="utf-8") as fh:
+            d = _json.load(fh)
         u = (d.get("assets") or {}).get("USDT", {}) or {}
         return {
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stt.st_mtime)),
+            "updated_at": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(stt.st_mtime)),
             "size": stt.st_size,
             "buyers": len(u.get("buyers_table") or []),
             "sellers": len(u.get("sellers_table") or []),
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"{type(e).__name__}: {e}"}
+
 
 with st.sidebar:
     st.subheader("Data status")
@@ -647,11 +699,14 @@ def sidebar_sections(cfg: dict) -> str:
     st.session_state["ui_section"] = section
 
     if section == "Operar":
+        st.markdown("# Dashboard P2P")
+        render_metrics()  # Mostrar las métricas aquí
         if "ui_verified_only" not in st.session_state:
             st.session_state["ui_verified_only"] = bool(cfg.get("verified_only", False))
         def _on_change_verified():
             c = load_config(); c["verified_only"] = bool(st.session_state.get("ui_verified_only")); save_config(c)
         st.sidebar.toggle("Solo comerciantes verificados", key="ui_verified_only", on_change=_on_change_verified)
+        
 
         c1, c2 = st.sidebar.columns(2)
         with c1:
@@ -679,6 +734,7 @@ def sidebar_sections(cfg: dict) -> str:
             "Elegí si querés anclar un activo",
             options=["Ninguno"] + ASSETS,
             index=(["Ninguno"] + ASSETS).index(st.session_state["ui_select_pin"]),
+
             key="ui_select_pin",
             on_change=_on_change_pin,
         )
@@ -832,6 +888,33 @@ def sidebar_sections(cfg: dict) -> str:
             st.success("Reporte generado (panel central)")
     return section
 
+def render_metrics():
+    data = load_effective_data()
+    if not data:
+        st.warning("No se encontraron métricas efectivas.")
+        return
+
+    assets = data.get("assets", {})
+    metrics = []
+    for asset, values in assets.items():
+        metrics.append({
+            "Asset": asset,
+            "Effective Buy Price": values.get("effective_buy_price"),
+            "Effective Sell Price": values.get("effective_sell_price"),
+            "Effective Mid": values.get("effective_mid"),
+            "Effective Spread (%)": values.get("effective_spread_percent")
+        })
+
+    df = pd.DataFrame(metrics)
+
+    st.title("Arbitraje - Métricas de Efectividad")
+    st.write(df)
+
+    # Mostrar gráficos de las métricas
+    st.bar_chart(df.set_index("Asset")[["Effective Buy Price", "Effective Sell Price"]])
+    st.line_chart(df.set_index("Asset")[["Effective Spread (%)"]])
+
+
 def _generate_report():
     data = load_data()
     assets = data.get("assets") or {}
@@ -870,9 +953,12 @@ def run_app():
     section = sidebar_sections(cfg)
     debug_box()  # ← muestra el JSON si activás el toggle
 
-    data = load_data()
-    assets = data.get("assets") or {}
-    ts = data.get("timestamp","-")
+    # usamos la vista "estable" (anti-parpadeo) para los assets del panel
+    assets = load_views_or_fallback() or {}
+
+    # timestamp lo tomamos del JSON crudo (si existe)
+    raw = _safe_read_json()
+    ts = raw.get("timestamp", "-") if isinstance(raw, dict) else "-"
 
     if section == "Operar":
         st.markdown(f"# Dashboard P2P — <span style='color:#999'>actualizado {ts}</span>", unsafe_allow_html=True)
@@ -933,9 +1019,7 @@ def run_app():
     def _fmt_spread(x):
         return 'n/a' if x is None else f"{x:.2f}%"
 
-    # injected: gentle autorefresh
-    
-    st.autorefresh(interval=3000, key="refresh")
+
 
     # injected: data banner
     try:
